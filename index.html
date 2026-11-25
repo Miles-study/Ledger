@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#2f6f5e">
+<title>我的账本</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{margin:0;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#f3f5f2;color:#222;padding-bottom:80px}
+header{position:sticky;top:0;z-index:5;background:#2f6f5e;color:#fff;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;gap:8px}
+header h1{font-size:18px;margin:0}
+#monthBar{display:flex;align-items:center;gap:6px;font-size:14px}
+#monthBar button{background:none;border:1px solid #ffffff88;color:#fff;border-radius:6px;padding:2px 10px}
+main{padding:12px;max-width:640px;margin:0 auto}
+.card{background:#fff;border-radius:12px;padding:14px;margin-bottom:12px;box-shadow:0 1px 2px #0001}
+.card h2{margin:4px 0;font-size:28px}
+.card h3{margin:0 0 10px;font-size:16px}
+.card h4{margin:14px 0 4px;font-size:14px;color:#555}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}
+small,.muted{color:#888;font-size:12px}
+.pos{color:#2e7d32}
+.neg{color:#c62828}
+label{display:block;font-size:14px;margin-bottom:10px}
+input,select,textarea{display:block;width:100%;margin-top:4px;padding:10px;font-size:16px;border:1px solid #ccc;border-radius:8px;background:#fff}
+button{font-size:15px;border-radius:8px;border:0;padding:10px 14px;background:#e8ecea;cursor:pointer}
+button.primary{background:#2f6f5e;color:#fff;width:100%;padding:12px}
+button.danger{background:#fbe9e7;color:#c62828;padding:4px 8px;font-size:12px}
+button.sub{background:#dfe9e4;color:#2f6f5e}
+.tabs{position:fixed;bottom:0;left:0;right:0;display:flex;background:#fff;border-top:1px solid #ddd;padding-bottom:env(safe-area-inset-bottom)}
+.tabs button{flex:1;background:none;border-radius:0;padding:10px 0;font-size:13px;color:#666}
+.tabs button.on{color:#2f6f5e;font-weight:600}
+.rec{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #eee;font-size:14px}
+.rec small{display:block;margin-top:2px}
+.rec .amt{display:flex;align-items:center;gap:6px}
+.bar{display:grid;grid-template-columns:56px 1fr 70px;gap:8px;align-items:center;font-size:13px;margin:6px 0}
+.track{background:#e8ecea;border-radius:4px;height:10px;overflow:hidden}
+.track i{display:block;height:100%;background:#2f6f5e}
+.person{padding:10px 0;border-bottom:1px solid #eee}
+.person form{display:flex;gap:6px;margin-top:6px}
+.person input{margin:0;padding:6px;width:90px}
+.person select{margin:0;padding:6px;width:auto;flex:1}
+.person button{padding:6px 8px;font-size:13px}
+.row{display:flex;justify-content:space-between;gap:8px;align-items:center}
+.sep{border:0;border-top:1px dashed #ccc;margin:14px 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>我的账本</h1>
+  <div id="monthBar">
+    <button data-act="prev">‹</button>
+    <span id="mlabel"></span>
+    <button data-act="next">›</button>
+  </div>
+</header>
+
+<main id="view"></main>
+
+<nav class="tabs">
+  <button data-tab="home" class="on">首页</button>
+  <button data-tab="add">记一笔</button>
+  <button data-tab="loan">借贷</button>
+  <button data-tab="card">信用卡</button>
+  <button data-tab="data">数据</button>
+</nav>
+
+<script>
+const KEY = 'ledger-v1';
+const TYPES = {expense:'支出',income:'收入',transfer:'转账',borrow_in:'借入',borrow_out:'借出',repay:'还款',collect:'收款'};
+const LOAN_TYPES = ['borrow_in','borrow_out','repay','collect'];
+const DEF = {
+  records: [],
+  accounts: [
+    {id:'cash', name:'现金', type:'asset', open:0},
+    {id:'bank', name:'储蓄卡', type:'asset', open:0},
+    {id:'alipay', name:'支付宝', type:'asset', open:0},
+    {id:'cc', name:'信用卡', type:'credit', open:0}
+  ],
+  categories: {
+    expense: ['餐饮','购物','交通','居住','娱乐','医疗','学习','人情','订阅','利息费用','其他'],
+    income: ['工资','副业','其他']
+  },
+  settings: {billDay: 20, dueDay: 5}
+};
+const clone = o => JSON.parse(JSON.stringify(o));
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const money = n => Number(n || 0).toFixed(2);
+const round2 = n => Math.round(n * 100) / 100;
+const ymd = d => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+const todayStr = () => ymd(new Date());
+const sum = arr => arr.reduce((s, r) => s + (r.amount || 0), 0);
+const byDate = (a, b) => b.date.localeCompare(a.date) || String(b.id).localeCompare(String(a.id));
+
+function load() {
+  try {
+    const s = JSON.parse(localStorage.getItem(KEY));
+    return s ? Object.assign(clone(DEF), s) : clone(DEF);
+  } catch (e) { return clone(DEF); }
+}
+let db = load();
+function save() { localStorage.setItem(KEY, JSON.stringify(db)); }
+
+let tab = 'home';
+let month = todayStr().slice(0, 7);
+
+const acc = id => db.accounts.find(a => a.id === id);
+const accName = id => (acc(id) || {name: '?'}).name;
+function accountOptions(sel) {
+  return db.accounts.map(a => `<option value="${esc(a.id)}"${a.id === sel ? ' selected' : ''}>${esc(a.name)}</option>`).join('');
+}
+
+// 每笔记录对账户余额的影响
+function effects(r) {
+  const a = r.amount, out = [];
+  switch (r.type) {
+    case 'expense':   out.push([r.account, -a]); break;
+    case 'income':    out.push([r.account, a]); break;
+    case 'transfer':  out.push([r.account, -a], [r.to, a]); break;
+    case 'borrow_in': out.push([r.account, a]); break;
+    case 'borrow_out':out.push([r.account, -a]); break;
+    case 'repay':     out.push([r.account, -a]); break;
+    case 'collect':   out.push([r.account, a]); break;
+  }
+  return out;
+}
+function balance(id) {
+  let b = (acc(id) || {}).open || 0;
+  db.records.forEach(r => effects(r).forEach(([k, d]) => { if (k === id) b += d; }));
+  return round2(b);
+}
+
+// 借贷：每个人我欠多少、欠我多少
+function loanInfo() {
+  const map = {};
+  db.records.forEach(r => {
+    if (!r.person) return;
+    const m = map[r.person] || (map[r.person] = {owe: 0, owed: 0});
+    if (r.type === 'borrow_in') m.owe += r.amount;
+    if (r.type === 'repay') m.owe -= r.amount;
+    if (r.type === 'borrow_out') m.owed += r.amount;
+    if (r.type === 'collect') m.owed -= r.amount;
+  });
+  return map;
+}
+function netWorth() {
+  const bal = db.accounts.reduce((s, a) => s + balance(a.id), 0);
+  const info = Object.values(loanInfo());
+  const owe = info.reduce((s, m) => s + m.owe, 0);
+  const owed = info.reduce((s, m) => s + m.owed, 0);
+  return bal + owed - owe;
+}
+
+// 信用卡账单周期
+function cycle(now, billDay, dueDay) {
+  const t = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  let end = new Date(t.getFullYear(), t.getMonth(), billDay);
+  if (end < t) end = new Date(t.getFullYear(), t.getMonth() + 1, billDay);
+  const start = new Date(end.getFullYear(), end.getMonth() - 1, billDay + 1);
+  let due = new Date(end.getFullYear(), end.getMonth(), dueDay);
+  if (due <= end) due = new Date(end.getFullYear(), end.getMonth() + 1, dueDay);
+  return {start, end, due};
+}
+
+function monthRecs(m) { return db.records.filter(r => r.date.startsWith(m)).sort(byDate); }
+
+function recList(list) {
+  if (!list.length) return '<p class="muted">暂无记录</p>';
+  return list.map(r => {
+    const isIn = ['income','collect','borrow_in'].includes(r.type);
+    const sign = r.type === 'transfer' ? '⇄' : (isIn ? '+' : '-');
+    const cls = r.type === 'transfer' ? '' : (isIn ? 'pos' : 'neg');
+    const who = r.person ? ' · ' + esc(r.person) : '';
+    const title = (r.category ? esc(r.category) : TYPES[r.type]) + who;
+    const accTxt = esc(accName(r.account)) + (r.type === 'transfer' ? ' → ' + esc(accName(r.to)) : '');
+    const note = r.note ? ' · ' + esc(r.note) : '';
+    return `<div class="rec"><div><b>${title}</b><small>${r.date} · ${TYPES[r.type]} · ${accTxt}${note}</small></div>
+      <div class="amt"><b class="${cls}">${sign}${money(r.amount)}</b><button class="danger" data-act="del" data-id="${esc(r.id)}">删</button></div></div>`;
+  }).join('');
+}
+
+/* ---------- 视图 ---------- */
+
+function viewHome() {
+  const recs = monthRecs(month);
+  const inc = sum(recs.filter(r => r.type === 'income'));
+  const exp = sum(recs.filter(r => r.type === 'expense'));
+  const side = sum(recs.filter(r => r.type === 'income' && r.category === '副业'));
+  const [y, m] = month.split('-').map(Number);
+  const isNow = month === todayStr().slice(0, 7);
+  const days = isNow ? new Date().getDate() : new Date(y, m, 0).getDate();
+
+  const cats = {};
+  recs.filter(r => r.type === 'expense').forEach(r => cats[r.category] = (cats[r.category] || 0) + r.amount);
+  const max = Math.max(1, ...Object.values(cats));
+  const bars = Object.entries(cats).sort((a, b) => b[1] - a[1])
+    .map(([c, v]) => `<div class="bar"><span>${esc(c)}</span><div class="track"><i style="width:${v / max * 100}%"></i></div><b>${money(v)}</b></div>`).join('')
+    || '<p class="muted">本月暂无支出</p>';
+
+  const accRows = db.accounts.map(a => {
+    const b = balance(a.id);
+    return `<div class="rec"><span>${esc(a.name)}</span><b>${a.type === 'credit' ? '应还 ' + money(-b) : money(b)}</b></div>`;
+  }).join('');
+
+  return `
+  <section class="card">
+    <small>本月结余</small>
+    <h2 class="${inc - exp >= 0 ? 'pos' : 'neg'}">${money(inc - exp)}</h2>
+    <div class="grid3">
+      <div><small>收入</small><br><b class="pos">${money(inc)}</b></div>
+      <div><small>支出</small><br><b class="neg">${money(exp)}</b></div>
+      <div><small>日均支出</small><br><b>${money(exp / days)}</b></div>
+    </div>
+    <p class="muted">其中副业收入 ${money(side)}</p>
+  </section>
+  <section class="card"><h3>本月支出分类</h3>${bars}</section>
+  <section class="card">
+    <h3>账户概况</h3>
+    ${accRows}
+    <p class="row" style="margin-top:10px"><span>净资产（含借贷）</span><b>${money(netWorth())}</b></p>
+  </section>
+  <section class="card"><h3>本月记录</h3>${recList(recs.slice(0, 15))}</section>`;
+}
+
+function viewAdd() {
+  const types = Object.entries(TYPES).map(([k, v]) => `<option value="${k}">${v}</option>`).join('');
+  return `
+  <form class="card" data-form="add">
+    <h3>记一笔</h3>
+    <label>日期<input type="date" name="date" value="${todayStr()}" required></label>
+    <label>类型<select name="type" id="typeSel">${types}</select></label>
+    <label>金额<input type="number" name="amount" step="0.01" min="0.01" inputmode="decimal" required></label>
+    <label id="catWrap">类别<select name="category" id="catSel"></select></label>
+    <label>账户<select name="account">${accountOptions()}</select></label>
+    <label id="toWrap" hidden>转入账户<select name="to">${accountOptions()}</select></label>
+    <label id="personWrap" hidden>对方姓名<input name="person" placeholder="如：小王"></label>
+    <label>备注<input name="note" placeholder="可不填"></label>
+    <button class="primary">保存</button>
+  </form>`;
+}
+
+function updateAddForm() {
+  const t = $('#typeSel');
+  if (!t) return;
+  const v = t.value;
+  const cats = v === 'expense' ? db.categories.expense : (v === 'income' ? db.categories.income : null);
+  $('#catWrap').hidden = !cats;
+  if (cats) $('#catSel').innerHTML = cats.map(c => `<option>${esc(c)}</option>`).join('');
+  $('#toWrap').hidden = v !== 'transfer';
+  $('#personWrap').hidden = !LOAN_TYPES.includes(v);
+}
+
+function viewLoan() {
+  const info = loanInfo();
+  const names = Object.keys(info);
+  const rows = names.map(p => {
+    const m = info[p];
+    const status = `${m.owe > 0.005 ? `<span class="neg">我欠 ${money(m.owe)}</span> ` : ''}${m.owed > 0.005 ? `<span class="pos">欠我 ${money(m.owed)}</span>` : ''}${m.owe <= 0.005 && m.owed <= 0.005 ? '<span class="muted">已结清</span>' : ''}`;
+    return `<div class="person">
+      <div class="row"><b>${esc(p)}</b><span>${status}</span></div>
+      <form data-form="quick" data-stay data-person="${esc(p)}">
+        <input type="number" name="amount" step="0.01" min="0.01" placeholder="金额" required>
+        <select name="account">${accountOptions()}</select>
+        <button class="sub" name="kind" value="repay">还款</button>
+        <button class="sub" name="kind" value="collect">收款</button>
+      </form>
+    </div>`;
+  }).join('') || '<p class="muted">还没有借贷记录</p>';
+
+  return `
+  <section class="card">
+    <h3>借贷对照</h3>
+    ${rows}
+  </section>
+  <form class="card" data-form="add" data-stay>
+    <h3>新增借入 / 借出</h3>
+    <input type="hidden" name="date" value="${todayStr()}">
+    <label>类型<select name="type">
+      <option value="borrow_in">借入（我欠别人）</option>
+      <option value="borrow_out">借出（别人欠我）</option>
+    </select></label>
+    <label>金额<input type="number" name="amount" step="0.01" min="0.01" inputmode="decimal" required></label>
+    <label>对方姓名<input name="person" required></label>
+    <label>账户<select name="account">${accountOptions()}</select></label>
+    <label>备注<input name="note" placeholder="如：约定月底还"></label>
+    <button class="primary">保存</button>
+  </form>
+  <section class="card">
+    <h3>借贷记录</h3>
+    ${recList(db.records.filter(r => LOAN_TYPES.includes(r.type)).sort(byDate))}
+  </section>`;
+}
+
+function cardBlock(c) {
+  const now = new Date();
+  const {start, end, due} = cycle(now, db.settings.billDay, db.settings.dueDay);
+  const s = ymd(start), e = ymd(end);
+  const list = db.records.filter(r => r.type === 'expense' && r.account === c.id && r.date >= s && r.date <= e).sort(byDate);
+  const today0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const daysLeft = Math.round((due - today0) / 86400000);
+  return `
+  <section class="card">
+    <h3>${esc(c.name)}</h3>
+    <div class="grid3">
+      <div><small>待还金额</small><br><b class="neg">${money(-balance(c.id))}</b></div>
+      <div><small>本期账单</small><br><b>${money(sum(list))}</b></div>
+      <div><small>还款日剩余</small><br><b>${daysLeft} 天</b></div>
+    </div>
+    <p class="muted">账单周期 ${s} 至 ${e}，还款日 ${ymd(due)}</p>
+    <p class="muted">还款请记成"转账"（从储蓄卡转到信用卡），不要记成支出，否则会重复计算。</p>
+    <h4>本期消费明细</h4>
+    ${recList(list)}
+  </section>`;
+}
+
+function viewCard() {
+  const cards = db.accounts.filter(a => a.type === 'credit');
+  const set = `
+  <form class="card" data-form="cardset">
+    <h3>账单设置</h3>
+    <div class="grid3" style="grid-template-columns:1fr 1fr">
+      <label>账单日（1-27）<input type="number" name="billDay" min="1" max="27" value="${db.settings.billDay}"></label>
+      <label>还款日（1-27）<input type="number" name="dueDay" min="1" max="27" value="${db.settings.dueDay}"></label>
+    </div>
+    <button class="primary">保存设置</button>
+    <p class="muted">如果有多张卡，账单日和还款日暂时统一设置。</p>
+  </form>`;
+  if (!cards.length) return '<section class="card"><p>还没有信用卡账户，请到"数据"页添加。</p></section>' + set;
+  return cards.map(cardBlock).join('') + set;
+}
+
+function viewData() {
+  const accRows = db.accounts.map(a => `<div class="rec"><span>${esc(a.name)}（${a.type === 'credit' ? '信用卡' : '资产'}）</span><small>期初 ${money(a.open)}</small></div>`).join('');
+  return `
+  <section class="card">
+    <h3>账户</h3>
+    ${accRows}
+    <form data-form="acc" style="margin-top:12px">
+      <label>名称<input name="name" required placeholder="如：招商银行卡"></label>
+      <label>类型<select name="type"><option value="asset">资产（银行卡、现金、支付账户）</option><option value="credit">信用卡</option></select></label>
+      <label>期初余额（信用卡填已欠金额，填负数）<input type="number" name="open" step="0.01" value="0"></label>
+      <button class="primary">添加账户</button>
+    </form>
+  </section>
+  <form class="card" data-form="cats">
+    <h3>类别（用逗号或空格分隔）</h3>
+    <label>支出类别<textarea name="expense" rows="3">${esc(db.categories.expense.join('、'))}</textarea></label>
+    <label>收入类别<textarea name="income" rows="2">${esc(db.categories.income.join('、'))}</textarea></label>
+    <button class="primary">保存类别</button>
+  </form>
+  <section class="card">
+    <h3>导出</h3>
+    <p class="muted">导出的文件保存到手机或电脑上，可用于备份，也可以交给 AI 分析。</p>
+    <div class="row" style="flex-wrap:wrap;justify-content:flex-start">
+      <button class="sub" data-act="exp-csv">明细 CSV</button>
+      <button class="sub" data-act="exp-month">月度汇总 CSV</button>
+      <button class="sub" data-act="exp-json">完整备份 JSON</button>
+    </div>
+  </section>
+  <section class="card">
+    <h3>导入备份</h3>
+    <p class="muted">导入会覆盖当前所有数据，请先导出备份。</p>
+    <input type="file" id="imp" accept=".json,application/json">
+  </section>
+  <section class="card">
+    <h3>危险操作</h3>
+    <button class="danger" data-act="clear">清空所有数据</button>
+  </section>`;
+}
+
+const views = {home: viewHome, add: viewAdd, loan: viewLoan, card: viewCard, data: viewData};
+
+function render() {
+  document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
+  $('#monthBar').hidden = tab !== 'home';
+  const [y, m] = month.split('-');
+  $('#mlabel').textContent = `${y}年${Number(m)}月`;
+  $('#view').innerHTML = views[tab]();
+  if (tab === 'add') updateAddForm();
+}
+
+/* ---------- 保存逻辑 ---------- */
+
+function addRecord(r) {
+  r.id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  db.records.push(r);
+  save();
+}
+
+const handlers = {
+  add(fd, f) {
+    const type = fd.get('type');
+    const amount = parseFloat(fd.get('amount'));
+    if (!(amount > 0)) return alert('请输入正确的金额');
+    const r = {
+      date: fd.get('date') || todayStr(), type, amount: round2(amount),
+      account: fd.get('account'), category: '', person: '', to: '', note: (fd.get('note') || '').trim()
+    };
+    if (type === 'expense' || type === 'income') r.category = fd.get('category') || '其他';
+    if (type === 'transfer') {
+      r.to = fd.get('to');
+      if (r.to === r.account) return alert('转出和转入账户不能相同');
+    }
+    if (LOAN_TYPES.includes(type)) {
+      r.person = (fd.get('person') || '').trim();
+      if (!r.person) return alert('请填写对方姓名');
+    }
+    addRecord(r);
+    month = r.date.slice(0, 7);
+    if (!f.hasAttribute('data-stay')) tab = 'home';
+    render();
+  },
+  quick(fd, f, sub) {
+    fd.set('type', sub && sub.value === 'collect' ? 'collect' : 'repay');
+    fd.set('person', f.dataset.person);
+    fd.set('date', todayStr());
+    handlers.add(fd, f);
+  },
+  cardset(fd) {
+    const b = Math.min(27, Math.max(1, parseInt(fd.get('billDay')) || 20));
+    const d = Math.min(27, Math.max(1, parseInt(fd.get('dueDay')) || 5));
+    db.settings = {billDay: b, dueDay: d};
+    save(); render();
+  },
+  acc(fd) {
+    const name = (fd.get('name') || '').trim();
+    if (!name) return;
+    db.accounts.push({
+      id: 'a' + Date.now().toString(36), name,
+      type: fd.get('type') === 'credit' ? 'credit' : 'asset',
+      open: round2(parseFloat(fd.get('open')) || 0)
+    });
+    save(); render();
+  },
+  cats(fd) {
+    const split = s => String(s || '').split(/[,，、\s]+/).map(x => x.trim()).filter(Boolean);
+    const exp = split(fd.get('expense')), inc = split(fd.get('income'));
+    if (exp.length) db.categories.expense = exp;
+    if (inc.length) db.categories.income = inc;
+    save(); alert('类别已保存'); render();
+  }
+};
+
+/* ---------- 导出 / 导入 ---------- */
+
+function download(name, text, type) {
+  const blob = new Blob([text], {type});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+const csvCell = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+const toCSV = rows => '\ufeff' + rows.map(r => r.map(csvCell).join(',')).join('\r\n');
+
+function exportDetailCSV() {
+  const head = ['id','日期','类型','金额','类别','账户','转入账户','对方','备注'];
+  const rows = db.records.slice().sort(byDate).map(r => [r.id, r.date, TYPES[r.type], r.amount, r.category, accName(r.account), r.type === 'transfer' ? accName(r.to) : '', r.person, r.note]);
+  download(`账本明细_${todayStr()}.csv`, toCSV([head, ...rows]), 'text/csv;charset=utf-8');
+}
+function exportMonthCSV() {
+  const months = {};
+  db.records.forEach(r => {
+    const k = r.date.slice(0, 7);
+    const m = months[k] || (months[k] = {inc: 0, exp: 0, side: 0});
+    if (r.type === 'income') { m.inc += r.amount; if (r.category === '副业') m.side += r.amount; }
+    if (r.type === 'expense') m.exp += r.amount;
+  });
+  const rows = Object.keys(months).sort().map(k => {
+    const m = months[k];
+    return [k, round2(m.inc), round2(m.exp), round2(m.inc - m.exp), round2(m.side)];
+  });
+  download(`账本月度汇总_${todayStr()}.csv`, toCSV([['月份','收入','支出','结余','其中副业收入'], ...rows]), 'text/csv;charset=utf-8');
+}
+function exportJSON() {
+  download(`账本备份_${todayStr()}.json`, JSON.stringify(db, null, 2), 'application/json');
+}
+
+/* ---------- 事件 ---------- */
+
+document.querySelector('.tabs').addEventListener('click', e => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  tab = b.dataset.tab;
+  render();
+  window.scrollTo(0, 0);
+});
+
+document.querySelector('#monthBar').addEventListener('click', e => {
+  const b = e.target.closest('[data-act]');
+  if (!b) return;
+  const [y, m] = month.split('-').map(Number);
+  const d = new Date(y, m - 1 + (b.dataset.act === 'next' ? 1 : -1), 1);
+  month = ymd(d).slice(0, 7);
+  render();
+});
+
+$('#view').addEventListener('click', e => {
+  const b = e.target.closest('[data-act]');
+  if (!b) return;
+  const act = b.dataset.act;
+  if (act === 'del') {
+    if (confirm('删除这条记录？')) {
+      db.records = db.records.filter(r => String(r.id) !== String(b.dataset.id));
+      save(); render();
+    }
+  } else if (act === 'exp-csv') exportDetailCSV();
+  else if (act === 'exp-month') exportMonthCSV();
+  else if (act === 'exp-json') exportJSON();
+  else if (act === 'clear') {
+    if (confirm('确定清空所有数据？建议先导出备份。') && confirm('再次确认：所有记录将被删除，无法恢复。')) {
+      db = clone(DEF); save(); render();
+    }
+  }
+});
+
+$('#view').addEventListener('change', e => {
+  if (e.target.id === 'typeSel') updateAddForm();
+  if (e.target.id === 'imp') {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const obj = JSON.parse(reader.result);
+        if (!Array.isArray(obj.records) || !Array.isArray(obj.accounts)) throw new Error('格式不对');
+        if (!confirm('导入会覆盖当前所有数据，确定继续？')) return;
+        db = Object.assign(clone(DEF), obj);
+        save(); render();
+        alert('导入成功');
+      } catch (err) {
+        alert('导入失败：这不是本账本的备份文件');
+      }
+    };
+    reader.readAsText(file);
+  }
+});
+
+$('#view').addEventListener('submit', e => {
+  e.preventDefault();
+  const f = e.target;
+  const key = f.dataset.form;
+  const fd = new FormData(f);
+  if (key === 'quick') handlers.quick(fd, f, e.submitter);
+  else if (handlers[key]) handlers[key](fd, f);
+});
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}
+
+render();
+</script>
+</body>
+</html>
